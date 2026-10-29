@@ -157,6 +157,38 @@ python run_attacks.py \
 > SafetyPolytope repository pins `transformers==4.45.2`. If runtime generation fails due API mismatches,
 > isolate SafetyPolytope in a compatible environment for evaluation or pin a known-compatible stack.
 
+#### Quick 5-prompt smoke benchmark (baseline vs SaP)
+
+Use a small prompt slice first to validate runtime wiring before full sweeps:
+
+```bash
+# baseline (undefended)
+python run_attacks.py \
+  hydra/launcher=basic \
+  classifiers=null \
+  attack=direct \
+  defense=none \
+  dataset=adv_behaviors \
+  datasets.adv_behaviors.idx=[0,1,2,3,4] \
+  model=qwen/Qwen2-7B-Instruct \
+  overwrite=true
+
+# defended (Safety Polytope)
+SAFETY_POLYTOPE_WEIGHTS=/abs/path/to/polytope_weights.pth \
+python run_attacks.py \
+  hydra/launcher=basic \
+  classifiers=null \
+  attack=direct \
+  defense=safety_polytope \
+  dataset=adv_behaviors \
+  datasets.adv_behaviors.idx=[0,1,2,3,4] \
+  model=qwen/Qwen2-7B-Instruct \
+  overwrite=true
+```
+
+If `SAFETY_POLYTOPE_WEIGHTS` points to a missing file, the defense fails closed with
+an explicit `FileNotFoundError` instead of silently running undefended.
+
 ### It's easy to add the custom defense you want to benchmark!
 To add a custom defense, subclass `TargetSystem`, implement `generate(...)`, add a `from_config(...)`
 constructor, and register the class in `adversariallm/defenses/registry.py`. Defenses can use

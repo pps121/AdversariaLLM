@@ -320,7 +320,11 @@ class LocalTextGenerator(TextGenerator):
 
             if token_list_cache is None:
                 token_list_cache = self._batch_tokenize(convs)
-                token_list_cache = [token.to(self.model.device.index) for token in token_list_cache]
+                try:
+                    model_device = self.model.device
+                except Exception:
+                    model_device = next(self.model.parameters()).device
+                token_list_cache = [token.to(model_device) for token in token_list_cache]
 
             try:
                 output = generate_ragged_batched(
