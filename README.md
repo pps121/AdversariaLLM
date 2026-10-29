@@ -129,6 +129,34 @@ python run_attacks.py \
   defense=polyguard
 ```
 
+### Safety Polytope (official upstream adapter)
+
+`defense=safety_polytope` uses the official upstream `SafeRepModel` implementation from
+[lasgroup/SafetyPolytope](https://github.com/lasgroup/SafetyPolytope). The adapter intentionally
+does **not** reimplement the steering algorithm.
+
+Prerequisites:
+
+1. Install the upstream `safety_polytope` package in the same environment.
+2. Obtain a real trained Safety Polytope `.pth` artifact and point to it via:
+   - `defenses.safety_polytope.weights_path=...`, or
+   - `SAFETY_POLYTOPE_WEIGHTS=/abs/path/to/weights.pth`.
+3. Ensure `defenses.safety_polytope.model_id` matches the base model used to train that artifact.
+
+Example usage:
+
+```bash
+SAFETY_POLYTOPE_WEIGHTS=/abs/path/to/polytope_weights.pth \
+python run_attacks.py \
+  attack=direct \
+  model=Qwen/Qwen2-1.5B-Instruct \
+  defense=safety_polytope
+```
+
+> ⚠️ Compatibility note: AdversariaLLM currently depends on `transformers==5.9.0`, while the upstream
+> SafetyPolytope repository pins `transformers==4.45.2`. If runtime generation fails due API mismatches,
+> isolate SafetyPolytope in a compatible environment for evaluation or pin a known-compatible stack.
+
 ### It's easy to add the custom defense you want to benchmark!
 To add a custom defense, subclass `TargetSystem`, implement `generate(...)`, add a `from_config(...)`
 constructor, and register the class in `adversariallm/defenses/registry.py`. Defenses can use
