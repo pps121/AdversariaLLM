@@ -186,6 +186,9 @@ python run_attacks.py \
   overwrite=true
 ```
 
+`overwrite=true` is recommended for local smoke runs: it bypasses run-dedup MongoDB checks and
+also skips MongoDB logging when DB environment variables are not configured.
+
 If `SAFETY_POLYTOPE_WEIGHTS` points to a missing file, the defense fails closed with
 an explicit `FileNotFoundError` instead of silently running undefended.
 
