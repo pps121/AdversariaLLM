@@ -31,15 +31,80 @@ def _last_user_text(conv: Conversation) -> str:
     return ""
 
 
+def _normalized_ref(value: str) -> str:
+    return value.strip().lower()
+
+
+def _model_refs_match(configured: str, loaded: str) -> bool:
+    configured_norm = _normalized_ref(configured)
+    loaded_norm = _normalized_ref(loaded)
+    if configured_norm == loaded_norm:
+        return True
+    return configured_norm.endswith(loaded_norm) or loaded_norm.endswith(configured_norm)
+
+
+def _loaded_model_reference(model: PreTrainedModel, tokenizer: PreTrainedTokenizerBase) -> str | None:
+    candidates = [
+        getattr(model, "name_or_path", None),
+        getattr(getattr(model, "config", None), "_name_or_path", None),
+        getattr(tokenizer, "name_or_path", None),
+    ]
+    for candidate in candidates:
+        if candidate:
+            candidate_text = str(candidate).strip()
+            if candidate_text:
+                return candidate_text
+    return None
+
+
+def _prepare_conversation_for_generation(conv: Conversation) -> tuple[Conversation, bool, bool]:
+    if not conv:
+        return [], True, False
+    rendered_conv = [{"role": str(m.get("role", "user")), "content": str(m.get("content", ""))} for m in conv]
+    last = rendered_conv[-1]
+    if last.get("role") != "assistant":
+        return rendered_conv, True, False
+    if not last.get("content"):
+        return rendered_conv[:-1], True, False
+    return rendered_conv, False, True
+
+
 def _render_conversation(tokenizer: Any, conv: Conversation) -> str:
     """Render messages with the checkpoint's own chat template when available."""
+    rendered_conv, add_generation_prompt, continue_final_message = _prepare_conversation_for_generation(conv)
+
     if hasattr(tokenizer, "apply_chat_template") and getattr(tokenizer, "chat_template", None):
+        if continue_final_message:
+            try:
+                return tokenizer.apply_chat_template(
+                    rendered_conv,
+                    tokenize=False,
+                    add_generation_prompt=False,
+                    continue_final_message=True,
+                )
+            except TypeError:
+                prefix_prompt = tokenizer.apply_chat_template(
+                    rendered_conv[:-1],
+                    tokenize=False,
+                    add_generation_prompt=True,
+                )
+                return prefix_prompt + rendered_conv[-1]["content"]
         return tokenizer.apply_chat_template(
-            conv, tokenize=False, add_generation_prompt=True
+            rendered_conv,
+            tokenize=False,
+            add_generation_prompt=add_generation_prompt,
         )
     # Fallback is deliberately explicit and role-labelled; it avoids silently
     # pretending a missing chat template exists.
-    return "\n".join(f"{m.get('role', 'user').upper()}: {m.get('content', '')}" for m in conv) + "\nASSISTANT:"
+    if not rendered_conv:
+        return "ASSISTANT:"
+    rendered_lines = [
+        f"{m.get('role', 'user').upper()}: {m.get('content', '')}"
+        for m in rendered_conv
+    ]
+    if continue_final_message:
+        return "\n".join(rendered_lines)
+    return "\n".join(rendered_lines + ["ASSISTANT:"])
 
 
 def _resolve_torch_dtype(value: Any, *, fallback: torch.dtype) -> Any:
@@ -145,9 +210,16 @@ class SafetyPolytopeDefense(TargetSystem):
     ) -> "SafetyPolytopeDefense":
         model_cfg = cfg.get("model") or {}
         model_id = cfg.get("model_id") or model_cfg.get("id")
+        loaded_model_ref = _loaded_model_reference(model, tokenizer)
         weights_path = cfg.get("weights_path") or cfg.get("polytope_weight_path")
         if not model_id:
             raise ValueError("SafetyPolytope config requires 'model_id'.")
+        if loaded_model_ref and not _model_refs_match(str(model_id), loaded_model_ref):
+            raise ValueError(
+                "SafetyPolytope model mismatch: defenses.safety_polytope.model_id="
+                f"{model_id!r} but the selected runner model is {loaded_model_ref!r}. "
+                "Use the same base model for the run model and Safety Polytope artifact."
+            )
         if not weights_path:
             raise ValueError(
                 "SafetyPolytope config requires 'weights_path' (or upstream-compatible alias "
@@ -200,6 +272,14 @@ class SafetyPolytopeDefense(TargetSystem):
                 "mismatch, an incompatible checkpoint, or an incompatible trained weights artifact. Do not proceed to "
                 "attack evaluation until this load succeeds. Original error: " + repr(exc)
             ) from exc
+        safe_tokenizer = getattr(safe_model, "tokenizer", None)
+        if safe_tokenizer is not None:
+            safe_tokenizer.padding_side = "left"
+            if (
+                getattr(safe_tokenizer, "pad_token_id", None) is None
+                and getattr(safe_tokenizer, "eos_token", None) is not None
+            ):
+                safe_tokenizer.pad_token = safe_tokenizer.eos_token
         if callable(getattr(safe_model, "eval", None)):
             safe_model.eval()
         return cls(
@@ -246,7 +326,7 @@ class SafetyPolytopeDefense(TargetSystem):
             _LOG.debug("SafetyPolytope adapter currently performs one generation attempt; retry_overrides are not applied.")
 
         prompts = [_render_conversation(self.safe_tokenizer, conv) for conv in convs]
-        tokenized = self.safe_tokenizer(
+        tokenized_original = self.safe_tokenizer(
             prompts,
             return_tensors="pt",
             padding=True,
@@ -259,22 +339,62 @@ class SafetyPolytopeDefense(TargetSystem):
             input_device = self.safe_model.model.embed_tokens.weight.device
         except Exception:
             input_device = next(self.safe_model.parameters()).device
-        input_ids = torch.as_tensor(tokenized["input_ids"]).to(input_device)
-        attention_mask = torch.as_tensor(tokenized["attention_mask"]).to(input_device)
-        input_width = input_ids.shape[1]
+        input_ids_original = torch.as_tensor(tokenized_original["input_ids"]).to(input_device)
+        attention_mask_original = torch.as_tensor(tokenized_original["attention_mask"]).to(input_device)
 
         generation_kwargs: dict[str, Any] = dict(self.default_generate_kwargs)
         generation_kwargs.update(kwargs)
+        framework_only_options = ("initial_batch_size", "verbose")
+        ignored_options = {
+            option: generation_kwargs.pop(option)
+            for option in framework_only_options
+            if option in generation_kwargs
+        }
+        if ignored_options:
+            _LOG.debug(
+                "SafetyPolytope adapter ignored framework-only generation options not supported by upstream SafeRepModel.generate: %s",
+                sorted(ignored_options),
+            )
         generation_kwargs["max_new_tokens"] = int(max_new_tokens or generation_kwargs.get("max_new_tokens", self.max_new_tokens))
         if temperature is not None:
             generation_kwargs["temperature"] = float(temperature)
             generation_kwargs["do_sample"] = float(temperature) > 0
         if top_p is not None:
             generation_kwargs["top_p"] = float(top_p)
-        if num_return_sequences is not None:
-            generation_kwargs["num_return_sequences"] = int(num_return_sequences)
+        requested_num_return_sequences = int(
+            num_return_sequences
+            if num_return_sequences is not None
+            else generation_kwargs.get("num_return_sequences", 1)
+        )
+        generation_kwargs["num_return_sequences"] = requested_num_return_sequences
         generation_kwargs.setdefault("pad_token_id", self.safe_tokenizer.pad_token_id or self.safe_tokenizer.eos_token_id)
         generation_kwargs.setdefault("eos_token_id", self.safe_tokenizer.eos_token_id)
+
+        do_sample = bool(generation_kwargs.get("do_sample", False))
+        num_beams = int(generation_kwargs.get("num_beams", 1) or 1)
+        expand_for_greedy_multi_return = (
+            requested_num_return_sequences > 1
+            and not do_sample
+            and num_beams == 1
+        )
+        run_prompts = prompts
+        if expand_for_greedy_multi_return:
+            run_prompts = [prompt for prompt in prompts for _ in range(requested_num_return_sequences)]
+            generation_kwargs["num_return_sequences"] = 1
+
+        tokenized = tokenized_original
+        if expand_for_greedy_multi_return:
+            tokenized = self.safe_tokenizer(
+                run_prompts,
+                return_tensors="pt",
+                padding=True,
+                truncation=self.max_input_tokens is not None,
+                max_length=self.max_input_tokens,
+                add_special_tokens=False,
+            )
+        input_ids = torch.as_tensor(tokenized["input_ids"]).to(input_device)
+        attention_mask = torch.as_tensor(tokenized["attention_mask"]).to(input_device)
+        input_width = input_ids.shape[1]
 
         # SaP's custom forward includes hidden-state optimization; gradients must
         # remain enabled. The output is expected to be [batch * returns, seq].
@@ -292,14 +412,20 @@ class SafetyPolytopeDefense(TargetSystem):
             )
         continuation_ids = generated_ids[:, input_width:]
         decoded = self.safe_tokenizer.batch_decode(continuation_ids, skip_special_tokens=True)
-        n = int(num_return_sequences or generation_kwargs.get("num_return_sequences", 1))
-        if len(decoded) != len(convs) * n:
+        expected_decoded = len(convs) * requested_num_return_sequences
+        if len(decoded) != expected_decoded:
             raise RuntimeError(
-                f"SafetyPolytope returned {len(decoded)} sequences for {len(convs)} prompts and {n} return sequences. "
+                f"SafetyPolytope returned {len(decoded)} sequences for {len(convs)} prompts and {requested_num_return_sequences} return sequences. "
                 "Check generation API compatibility before using evaluation results."
             )
-        grouped = [decoded[i * n:(i + 1) * n] for i in range(len(convs))]
-        input_id_rows = [row[mask.bool()].tolist() for row, mask in zip(input_ids, attention_mask)]
+        grouped = [
+            decoded[i * requested_num_return_sequences:(i + 1) * requested_num_return_sequences]
+            for i in range(len(convs))
+        ]
+        input_id_rows = [
+            row[mask.bool()].tolist()
+            for row, mask in zip(input_ids_original, attention_mask_original)
+        ]
         metadata = [[{
             "defense": self.NAME,
             "upstream_model": getattr(self.safe_model, "model_name_or_path", self.model_id),

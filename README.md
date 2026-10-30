@@ -170,7 +170,7 @@ python run_attacks.py \
   defense=none \
   dataset=adv_behaviors \
   datasets.adv_behaviors.idx=[0,1,2,3,4] \
-  model=qwen/Qwen2-7B-Instruct \
+  model=Qwen/Qwen2-1.5B-Instruct \
   overwrite=true
 
 # defended (Safety Polytope)
@@ -182,9 +182,12 @@ python run_attacks.py \
   defense=safety_polytope \
   dataset=adv_behaviors \
   datasets.adv_behaviors.idx=[0,1,2,3,4] \
-  model=qwen/Qwen2-7B-Instruct \
+  model=Qwen/Qwen2-1.5B-Instruct \
   overwrite=true
 ```
+
+Use the same model in `model=...` as `defenses.safety_polytope.model_id` and as the model used to train
+the Safety Polytope `.pth` artifact. Mismatches are now rejected at runtime.
 
 `overwrite=true` is recommended for local smoke runs: it bypasses run-dedup MongoDB checks and
 also skips MongoDB logging when DB environment variables are not configured.

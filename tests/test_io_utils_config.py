@@ -43,7 +43,7 @@ def test_mongodb_is_configured_with_uri(monkeypatch):
     assert mongodb_is_configured() is True
 
 
-def test_mongodb_is_configured_requires_all_parts_without_uri(monkeypatch):
+def test_mongodb_is_configured_uses_username_db_fallback_without_uri(monkeypatch):
     monkeypatch.delenv("MONGODB_URI", raising=False)
     monkeypatch.setenv("MONGODB_USER", "user")
     monkeypatch.setenv("MONGODB_PASSWORD", "pw")
@@ -52,4 +52,7 @@ def test_mongodb_is_configured_requires_all_parts_without_uri(monkeypatch):
     assert mongodb_is_configured() is True
 
     monkeypatch.delenv("MONGODB_DB", raising=False)
+    assert mongodb_is_configured() is True
+
+    monkeypatch.delenv("MONGODB_USER", raising=False)
     assert mongodb_is_configured() is False

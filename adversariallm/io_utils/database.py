@@ -22,7 +22,7 @@ def mongodb_is_configured() -> bool:
         return True
     return all(
         os.environ.get(key)
-        for key in ("MONGODB_USER", "MONGODB_PASSWORD", "MONGODB_HOST", "MONGODB_DB")
+        for key in ("MONGODB_USER", "MONGODB_PASSWORD", "MONGODB_HOST")
     )
 
 
